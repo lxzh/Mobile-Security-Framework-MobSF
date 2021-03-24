@@ -8,7 +8,7 @@ priv_key = windows_vm_priv_key.asc
 pub_key = windows_vm_pub_key.asc
 
 [nuget]
-url = https://dist.nuget.org/win-x86-commandline/latest/nuget.exe
+url = https://github.com/lxzh/lxzh.github.io/blob/master/oss/nuget.exe
 file = nuget.exe
 
 [binskim]
