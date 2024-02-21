@@ -6,23 +6,33 @@ import os
 import platform
 import re
 import shutil
+from pathlib import Path
 from wsgiref.util import FileWrapper
 
 from django.conf import settings
 from django.core.paginator import Paginator
 from django.http import HttpResponse, HttpResponseRedirect
-from django.shortcuts import render
+from django.utils import timezone
+from django.shortcuts import (
+    redirect,
+    render,
+)
 from django.template.defaulttags import register
 
 from mobsf.MobSF.forms import FormUtil, UploadFileForm
 from mobsf.MobSF.utils import (
     api_key,
+    get_md5,
     is_dir_exists,
     is_file_exists,
+    is_md5,
+    is_safe_path,
+    key,
     print_n_send_error_response,
 )
 from mobsf.MobSF.views.helpers import FileType
 from mobsf.MobSF.views.scanning import Scanning
+from mobsf.MobSF.views.apk_downloader import apk_download
 from mobsf.StaticAnalyzer.models import (
     RecentScansDB,
     StaticAnalyzerAndroid,
@@ -33,12 +43,7 @@ from mobsf.StaticAnalyzer.models import (
 LINUX_PLATFORM = ['Darwin', 'Linux']
 HTTP_BAD_REQUEST = 400
 logger = logging.getLogger(__name__)
-
-
-@register.filter
-def key(d, key_name):
-    """To get dict element by key name in template."""
-    return d.get(key_name)
+register.filter('key', key)
 
 
 def index(request):
@@ -136,10 +141,22 @@ class Upload(object):
             return scanning.scan_apk()
         elif self.file_type.is_xapk():
             return scanning.scan_xapk()
+        elif self.file_type.is_apks():
+            return scanning.scan_apks()
+        elif self.file_type.is_jar():
+            return scanning.scan_jar()
+        elif self.file_type.is_aar():
+            return scanning.scan_aar()
+        elif self.file_type.is_so():
+            return scanning.scan_so()
         elif self.file_type.is_zip():
             return scanning.scan_zip()
         elif self.file_type.is_ipa():
             return scanning.scan_ipa()
+        elif self.file_type.is_dylib():
+            return scanning.scan_dylib()
+        elif self.file_type.is_a():
+            return scanning.scan_a()
         elif self.file_type.is_appx():
             return scanning.scan_appx()
 
@@ -147,7 +164,7 @@ class Upload(object):
 def api_docs(request):
     """Api Docs Route."""
     context = {
-        'title': 'REST API Docs',
+        'title': 'API Docs',
         'api_key': api_key(),
         'version': settings.MOBSF_VER,
     }
@@ -162,6 +179,16 @@ def about(request):
         'version': settings.MOBSF_VER,
     }
     template = 'general/about.html'
+    return render(request, template, context)
+
+
+def donate(request):
+    """Donate Route."""
+    context = {
+        'title': 'Donate',
+        'version': settings.MOBSF_VER,
+    }
+    template = 'general/donate.html'
     return render(request, template, context)
 
 
@@ -185,6 +212,16 @@ def zip_format(request):
     return render(request, template, context)
 
 
+def dynamic_analysis(request):
+    """Dynamic Analysis Landing."""
+    context = {
+        'title': 'Dynamic Analysis',
+        'version': settings.MOBSF_VER,
+    }
+    template = 'general/dynamic.html'
+    return render(request, template, context)
+
+
 def not_found(request):
     """Not Found Route."""
     context = {
@@ -200,14 +237,28 @@ def recent_scans(request):
     entries = []
     db_obj = RecentScansDB.objects.all().order_by('-TIMESTAMP').values()
     android = StaticAnalyzerAndroid.objects.all()
+    ios = StaticAnalyzerIOS.objects.all()
+    updir = Path(settings.UPLD_DIR)
+    icon_mapping = {}
     package_mapping = {}
     for item in android:
         package_mapping[item.MD5] = item.PACKAGE_NAME
+        icon_mapping[item.MD5] = item.ICON_PATH
+    for item in ios:
+        icon_mapping[item.MD5] = item.ICON_PATH
     for entry in db_obj:
         if entry['MD5'] in package_mapping.keys():
             entry['PACKAGE'] = package_mapping[entry['MD5']]
         else:
             entry['PACKAGE'] = ''
+        entry['ICON_PATH'] = icon_mapping.get(entry['MD5'], '')
+        if entry['FILE_NAME'].endswith('.ipa'):
+            entry['BUNDLE_HASH'] = get_md5(
+                entry['PACKAGE_NAME'].encode('utf-8'))
+            report_file = updir / entry['BUNDLE_HASH'] / 'mobsf_dump_file.txt'
+        else:
+            report_file = updir / entry['MD5'] / 'logcat.txt'
+        entry['DYNAMIC_REPORT_EXISTS'] = report_file.exists()
         entries.append(entry)
     context = {
         'title': 'Recent Scans',
@@ -218,6 +269,25 @@ def recent_scans(request):
     return render(request, template, context)
 
 
+def download_apk(request):
+    """Download and APK by package name."""
+    package = request.POST['package']
+    # Package validated in apk_download()
+    context = {
+        'status': 'failed',
+        'description': 'Unable to download APK',
+    }
+    res = apk_download(package)
+    if res:
+        context = res
+        context['status'] = 'ok'
+        context['package'] = package
+    resp = HttpResponse(
+        json.dumps(context),
+        content_type='application/json; charset=utf-8')
+    return resp
+
+
 def search(request):
     """Search Scan by MD5 Route."""
     md5 = request.GET['md5']
@@ -225,8 +295,7 @@ def search(request):
         db_obj = RecentScansDB.objects.filter(MD5=md5)
         if db_obj.exists():
             e = db_obj[0]
-            url = (f'/{e.ANALYZER }/?name={e.FILE_NAME}&'
-                   f'checksum={e.MD5}&type={e.SCAN_TYPE}')
+            url = f'/{e.ANALYZER }/{e.MD5}/'
             return HttpResponseRedirect(url)
         else:
             return HttpResponseRedirect('/not_found/')
@@ -235,28 +304,70 @@ def search(request):
 
 def download(request):
     """Download from mobsf.MobSF Route."""
-    msg = 'Error Downloading File '
     if request.method == 'GET':
+        root = settings.DWD_DIR
         allowed_exts = settings.ALLOWED_EXTENSIONS
         filename = request.path.replace('/download/', '', 1)
+        dwd_file = os.path.join(root, filename)
         # Security Checks
-        if '../' in filename:
+        if '../' in filename or not is_safe_path(root, dwd_file):
             msg = 'Path Traversal Attack Detected'
             return print_n_send_error_response(request, msg)
         ext = os.path.splitext(filename)[1]
         if ext in allowed_exts:
-            dwd_file = os.path.join(settings.DWD_DIR, filename)
             if os.path.isfile(dwd_file):
-                wrapper = FileWrapper(open(dwd_file, 'rb'))
+                wrapper = FileWrapper(
+                    open(dwd_file, 'rb'))  # lgtm [py/path-injection]
                 response = HttpResponse(
                     wrapper, content_type=allowed_exts[ext])
                 response['Content-Length'] = os.path.getsize(dwd_file)
                 return response
-    if ('screen/screen.png' not in filename
-            and '-icon.png' not in filename):
-        msg += filename
+        if filename.endswith(('screen/screen.png', '-icon.png')):
+            return HttpResponse('')
+    return HttpResponse(status=404)
+
+
+def generate_download(request):
+    """Generate downloads for uploaded binaries/source."""
+    try:
+        binary = ('apk', 'ipa', 'jar', 'aar', 'so', 'dylib', 'a')
+        source = ('smali', 'java')
+        logger.info('Generating Downloads')
+        md5 = request.GET['hash']
+        file_type = request.GET['file_type']
+        if (not is_md5(md5)
+                or file_type not in binary + source):
+            msg = 'Invalid download type or hash'
+            logger.exception(msg)
+            return print_n_send_error_response(request, msg)
+        app_dir = Path(settings.UPLD_DIR) / md5
+        dwd_dir = Path(settings.DWD_DIR)
+        file_name = ''
+        if file_type == 'java':
+            # For Java zipped source code
+            directory = app_dir / 'java_source'
+            dwd_file = dwd_dir / f'{md5}-java'
+            shutil.make_archive(
+                dwd_file.as_posix(), 'zip', directory.as_posix())
+            file_name = f'{md5}-java.zip'
+        elif file_type == 'smali':
+            # For Smali zipped source code
+            directory = app_dir / 'smali_source'
+            dwd_file = dwd_dir / f'{md5}-smali'
+            shutil.make_archive(
+                dwd_file.as_posix(), 'zip', directory.as_posix())
+            file_name = f'{md5}-smali.zip'
+        elif file_type in binary:
+            # Binaries
+            file_name = f'{md5}.{file_type}'
+            src = app_dir / file_name
+            dst = dwd_dir / file_name
+            shutil.copy2(src.as_posix(), dst.as_posix())
+        return redirect(f'/download/{file_name}')
+    except Exception:
+        msg = 'Generating Downloads'
+        logger.exception(msg)
         return print_n_send_error_response(request, msg)
-    return HttpResponse('')
 
 
 def delete_scan(request, api=False):
@@ -326,3 +437,9 @@ class RecentScans(object):
         except Exception as exp:
             data = {'error': str(exp)}
         return data
+
+
+def update_scan_timestamp(scan_hash):
+    # Update the last scan time.
+    tms = timezone.now()
+    RecentScansDB.objects.filter(MD5=scan_hash).update(TIMESTAMP=tms)

@@ -74,18 +74,20 @@ COCOA_KEYS = {
     'NSVideoSubscriberAccountUsageDescription': (
         'Access the user’s TV provider account.',
         'normal'),
+    'NSLocalNetworkUsageDescription': (
+        'Allow app to request access to the local network.',
+        'normnal'),
 }
 
 
 def check_permissions(p_list):
     """Check the permissions the app requests."""
-    permissions = []
+    permissions = {}
     for perm, desc in COCOA_KEYS.items():
         if perm in p_list:
-            permissions.append({
-                'name': perm,
-                'description': desc[0],
+            permissions[perm] = {
+                'info': desc[0],
                 'status': desc[1],
-                'reason': p_list.get(perm, ''),
-            })
+                'description': p_list.get(perm, ''),
+            }
     return permissions

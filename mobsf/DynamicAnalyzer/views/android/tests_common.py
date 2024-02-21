@@ -2,14 +2,17 @@
 """Available Actions."""
 import logging
 import os
+import re
 
 from django.conf import settings
 from django.views.decorators.http import require_http_methods
 
-from mobsf.DynamicAnalyzer.views.android.operations import (
-    get_package_name,
+from mobsf.DynamicAnalyzer.views.common.shared import (
     invalid_params,
     send_response,
+)
+from mobsf.DynamicAnalyzer.views.android.operations import (
+    get_package_name,
 )
 from mobsf.DynamicAnalyzer.views.android.environment import (
     Environment,
@@ -17,9 +20,14 @@ from mobsf.DynamicAnalyzer.views.android.environment import (
 from mobsf.DynamicAnalyzer.views.android.tests_xposed import (
     download_xposed_log,
 )
-from mobsf.DynamicAnalyzer.tools.webproxy import stop_httptools
-from mobsf.MobSF.utils import (
+from mobsf.DynamicAnalyzer.views.android.tests_tls import (
+    run_tls_tests,
+)
+from mobsf.DynamicAnalyzer.tools.webproxy import (
     get_http_tools_url,
+    stop_httptools,
+)
+from mobsf.MobSF.utils import (
     is_md5,
     python_list,
 )
@@ -27,9 +35,39 @@ from mobsf.StaticAnalyzer.models import StaticAnalyzerAndroid
 
 logger = logging.getLogger(__name__)
 
+
 # AJAX
+@require_http_methods(['POST'])
+def start_activity(request, api=False):
+    """Lunch a specific activity."""
+    try:
+        env = Environment()
+        activity = request.POST['activity']
+        md5_hash = request.POST['hash']
+
+        valid_md5 = is_md5(md5_hash)
+        valid_act = re.match(r'^[\w]+(\.[\w]+)*$', activity)
+        if not valid_act or not valid_md5:
+            return invalid_params(api)
+
+        app_dir = os.path.join(settings.UPLD_DIR, md5_hash + '/')
+        screen_dir = os.path.join(app_dir, 'screenshots-apk/')
+        if not os.path.exists(screen_dir):
+            os.makedirs(screen_dir)
+        logger.info('Launching Activity - %s', activity)
+        outfile = ('{}act-{}.png'.format(screen_dir, activity))
+        static_android_db = StaticAnalyzerAndroid.objects.get(
+            MD5=md5_hash)
+        package = static_android_db.PACKAGE_NAME
+        env.launch_n_capture(package, activity, outfile)
+        data = {'status': 'ok'}
+    except Exception as exp:
+        logger.exception('Start Activity')
+        data = {'status': 'failed', 'message': str(exp)}
+    return send_response(data, api)
 
 
+# AJAX
 @require_http_methods(['POST'])
 def activity_tester(request, api=False):
     """Exported & non exported activity Tester."""
@@ -57,7 +95,7 @@ def activity_tester(request, api=False):
             activities = python_list(static_android_db.ACTIVITIES)
         logger.info('Fetching %sactivities for %s', iden, package)
         if not activities:
-            msg = 'No {}Activites found'.format(iden)
+            msg = 'No {}Activities found'.format(iden)
             logger.info(msg)
             data = {'status': 'failed',
                     'message': msg}
@@ -107,8 +145,7 @@ def download_data(request, api=False):
                     'message': 'App details not found in database'}
             return send_response(data, api)
         apk_dir = os.path.join(settings.UPLD_DIR, md5_hash + '/')
-        httptools_url = get_http_tools_url(request)
-        stop_httptools(httptools_url)
+        stop_httptools(get_http_tools_url(request))
         files_loc = '/data/local/'
         logger.info('Archiving files created by app')
         env.adb_command(['tar', '-cvf', files_loc + package + '.tar',
@@ -166,4 +203,42 @@ def collect_logs(request, api=False):
     except Exception as exp:
         logger.exception('Data Collection & Clean Up failed')
         data = {'status': 'failed', 'message': str(exp)}
+    return send_response(data, api)
+
+# AJAX
+
+
+@require_http_methods(['POST'])
+def tls_tests(request, api=False):
+    """Perform TLS tests."""
+    logger.info('Running TLS/SSL Security tests')
+    data = {}
+    package = None
+    try:
+        test_duration = 25
+        test_package = 'tls_tests'
+        env = Environment()
+        md5_hash = request.POST['hash']
+        if not is_md5(md5_hash):
+            return invalid_params(api)
+        package = get_package_name(md5_hash)
+        if not package:
+            data = {'status': 'failed',
+                    'message': 'App details not found in database'}
+            return send_response(data, api)
+        res = run_tls_tests(
+            request,
+            md5_hash,
+            env,
+            package,
+            test_package,
+            test_duration,
+        )
+        data = {'status': 'ok', 'tls_tests': res}
+    except Exception as exp:
+        logger.exception('Checking Application Security in Transit')
+        data = {'status': 'failed', 'message': str(exp)}
+    finally:
+        logger.info('Test Completed. Resuming HTTPS Proxy')
+        env.configure_proxy(package, request)
     return send_response(data, api)

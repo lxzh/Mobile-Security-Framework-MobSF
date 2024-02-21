@@ -7,7 +7,7 @@ from django.conf import settings
 from mobsf.MalwareAnalyzer.views.MalwareDomainCheck import (
     MalwareDomainCheck,
 )
-from mobsf.StaticAnalyzer.views.shared_func import (
+from mobsf.StaticAnalyzer.views.common.shared_func import (
     url_n_email_extract,
 )
 from mobsf.StaticAnalyzer.views.sast_engine import scan
@@ -20,6 +20,19 @@ class _SourceType(Enum):
     objc = 'Objective-C'
     swift_and_objc = 'Swift, Objective-C'
     nocode = 'No Code'
+
+
+def merge_findings(swift, objc):
+    code_analysis = {}
+    # Add all unique keys
+    for k in swift:
+        if k in objc:
+            swift[k]['files'].update(objc[k]['files'])
+        code_analysis[k] = swift[k]
+    for k in objc:
+        if k not in code_analysis:
+            code_analysis[k] = objc[k]
+    return code_analysis
 
 
 def ios_source_analysis(src):
@@ -40,20 +53,22 @@ def ios_source_analysis(src):
         source_types = set()
 
         # Code and API Analysis
-        code_findings = scan(
+        objc_findings = scan(
             objective_c_rules.as_posix(),
             {'.m'},
             [src],
             settings.SKIP_CLASS_PATH)
-        if code_findings:
+        if objc_findings:
             source_types.add(_SourceType.objc)
-        code_findings.update(scan(
+        swift_findings = scan(
             swift_rules.as_posix(),
             {'.swift'},
             [src],
-            settings.SKIP_CLASS_PATH))
-        if code_findings:
+            settings.SKIP_CLASS_PATH)
+        if swift_findings:
             source_types.add(_SourceType.swift)
+        code_findings = merge_findings(swift_findings, objc_findings)
+        # API Analysis
         api_findings = scan(
             api_rules.as_posix(),
             {'.m', '.swift'},

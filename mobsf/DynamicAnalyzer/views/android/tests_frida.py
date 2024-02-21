@@ -1,12 +1,11 @@
 # -*- coding: utf_8 -*-
 """Frida tests."""
 import base64
-import glob
 import os
 import re
 import json
 from pathlib import Path
-import threading
+from threading import Thread
 import logging
 
 from django.shortcuts import render
@@ -14,17 +13,19 @@ from django.conf import settings
 from django.views.decorators.http import require_http_methods
 
 from mobsf.DynamicAnalyzer.views.android.frida_core import Frida
-from mobsf.DynamicAnalyzer.views.android.operations import (
-    get_package_name,
+from mobsf.DynamicAnalyzer.views.common.shared import (
     invalid_params,
     is_attack_pattern,
     send_response,
 )
+from mobsf.DynamicAnalyzer.views.android.operations import (
+    get_package_name,
+)
 from mobsf.MobSF.utils import (
     is_file_exists,
     is_md5,
-    is_safe_path,
     print_n_send_error_response,
+    strict_package_check,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,42 +33,23 @@ logger = logging.getLogger(__name__)
 # AJAX
 
 
-@require_http_methods(['GET'])
-def list_frida_scripts(request, api=False):
-    """Get frida scripts from others."""
-    scripts = []
-    others = os.path.join(settings.TOOLS_DIR,
-                          'frida_scripts',
-                          'others')
-    files = glob.glob(others + '**/*.js', recursive=True)
-    for item in files:
-        scripts.append(Path(item).stem)
-    return send_response({'status': 'ok',
-                          'files': scripts},
-                         api)
-# AJAX
-
-
 @require_http_methods(['POST'])
-def get_script(request, api=False):
-    """Get frida scripts from others."""
-    data = {'status': 'ok', 'content': ''}
+def get_runtime_dependencies(request, api=False):
+    """Get App runtime dependencies."""
+    data = {
+        'status': 'failed',
+        'message': 'Failed to get runtime dependencies'}
     try:
-        scripts = request.POST.getlist('scripts[]')
-        others = os.path.join(settings.TOOLS_DIR,
-                              'frida_scripts',
-                              'others')
-        script_ct = []
-        for script in scripts:
-            script_file = os.path.join(others, script + '.js')
-            if not is_safe_path(others, script_file):
-                data = {
-                    'status': 'failed',
-                    'message': 'Path traversal detected.'}
-                return send_response(data, api)
-            if is_file_exists(script_file):
-                script_ct.append(Path(script_file).read_text())
-        data['content'] = '\n'.join(script_ct)
+        checksum = request.POST['hash']
+        if not is_md5(checksum):
+            return invalid_params(api)
+        package = get_package_name(checksum)
+        if not package:
+            return invalid_params(api)
+        get_dependencies(package, checksum)
+        return send_response(
+            {'status': 'ok'},
+            api)
     except Exception:
         pass
     return send_response(data, api)
@@ -77,9 +59,13 @@ def get_script(request, api=False):
 @require_http_methods(['POST'])
 def instrument(request, api=False):
     """Instrument app with frida."""
-    data = {}
+    data = {
+        'status': 'failed',
+        'message': 'Failed to instrument app'}
     try:
-        logger.info('Starting Instrumentation')
+        action = request.POST.get('frida_action', 'spawn')
+        pid = request.POST.get('pid')
+        new_pkg = request.POST.get('new_package')
         md5_hash = request.POST['hash']
         default_hooks = request.POST['default_hooks']
         auxiliary_hooks = request.POST['auxiliary_hooks']
@@ -95,11 +81,14 @@ def instrument(request, api=False):
         cls_trace = request.POST.get('class_trace')
         if cls_trace:
             extras['class_trace'] = cls_trace.strip()
+
         if (is_attack_pattern(default_hooks)
-                or not is_md5(md5_hash)):
+                or is_attack_pattern(auxiliary_hooks)
+                or not is_md5(md5_hash)
+                or (new_pkg and not strict_package_check(new_pkg))):
             return invalid_params(api)
         package = get_package_name(md5_hash)
-        if not package:
+        if not package and not new_pkg:
             return invalid_params(api)
         frida_obj = Frida(md5_hash,
                           package,
@@ -107,10 +96,27 @@ def instrument(request, api=False):
                           auxiliary_hooks.split(','),
                           extras,
                           code)
-        trd = threading.Thread(target=frida_obj.connect)
-        trd.daemon = True
-        trd.start()
-        data = {'status': 'ok'}
+        if action == 'spawn':
+            logger.info('Starting Instrumentation')
+            frida_obj.spawn()
+        elif action == 'ps':
+            logger.info('Enumerating running applications')
+            data['message'] = frida_obj.ps()
+        elif action == 'get':
+            # Get injected Frida script.
+            data['message'] = frida_obj.get_script()
+        if action in ('spawn', 'session'):
+            if pid and pid.isdigit():
+                # Attach to a different pid/bundle id
+                args = (int(pid), new_pkg)
+                logger.info('Attaching to %s [PID: %s]', new_pkg, pid)
+            else:
+                # Injecting to existing session/spawn
+                if action == 'session':
+                    logger.info('Injecting to existing frida session')
+                args = (None, None)
+            Thread(target=frida_obj.session, args=args, daemon=True).start()
+        data['status'] = 'ok'
     except Exception as exp:
         logger.exception('Instrumentation failed')
         data = {'status': 'failed', 'message': str(exp)}
@@ -154,44 +160,6 @@ def live_api(request, api=False):
     except Exception:
         logger.exception('API monitor streaming')
         err = 'Error in API monitor streaming'
-        return print_n_send_error_response(request, err, api)
-
-
-def frida_logs(request, api=False):
-    try:
-        if api:
-            apphash = request.POST['hash']
-            stream = True
-        else:
-            apphash = request.GET.get('hash', '')
-            stream = request.GET.get('stream', '')
-        if not is_md5(apphash):
-            return invalid_params(api)
-        if stream:
-            apk_dir = os.path.join(settings.UPLD_DIR, apphash + '/')
-            frida_logs = os.path.join(apk_dir, 'mobsf_frida_out.txt')
-            data = {}
-            if not is_file_exists(frida_logs):
-                data = {
-                    'status': 'failed',
-                    'message': 'Data does not exist.'}
-                return send_response(data, api)
-            with open(frida_logs, 'r',
-                      encoding='utf8',
-                      errors='ignore') as flip:
-                data = {'data': flip.read()}
-            return send_response(data, api)
-        logger.info('Frida Logs live streaming')
-        template = 'dynamic_analysis/android/frida_logs.html'
-        return render(request,
-                      template,
-                      {'hash': apphash,
-                       'package': request.GET.get('package', ''),
-                       'version': settings.MOBSF_VER,
-                       'title': 'Live Frida logs'})
-    except Exception:
-        logger.exception('Frida log streaming')
-        err = 'Error in Frida log streaming'
         return print_n_send_error_response(request, err, api)
 
 
@@ -240,9 +208,10 @@ def apimon_analysis(app_dir):
     """API Analysis."""
     api_details = {}
     try:
+        strings = []
         location = os.path.join(app_dir, 'mobsf_api_monitor.txt')
         if not is_file_exists(location):
-            return {}
+            return api_details, strings
         logger.info('Frida API Monitor Analysis')
         with open(location, 'r',
                   encoding='utf8',
@@ -253,7 +222,8 @@ def apimon_analysis(app_dir):
             to_decode = None
             if (api['class'] == 'android.util.Base64'
                     and (api['method'] == 'encodeToString')):
-                to_decode = api['returnValue'].replace('"', '')
+                if api.get('returnValue'):
+                    to_decode = api['returnValue'].replace('"', '')
             elif (api['class'] == 'android.util.Base64'
                   and api['method'] == 'decode'):
                 to_decode = api['arguments'][0]
@@ -261,6 +231,7 @@ def apimon_analysis(app_dir):
                 if to_decode:
                     api['decoded'] = decode_base64(
                         to_decode).decode('utf-8', 'ignore')
+                    strings.append((api['calledFrom'], api['decoded']))
             except Exception:
                 pass
             api['icon'] = get_icon_map(api['name'])
@@ -270,4 +241,43 @@ def apimon_analysis(app_dir):
                 api_details[api['name']] = [api]
     except Exception:
         logger.exception('API Monitor Analysis')
-    return api_details
+    return api_details, strings
+
+
+def get_dependencies(package, checksum):
+    """Get 3rd party dependencies at runtime."""
+    frd = Frida(
+        checksum,
+        package,
+        ['ssl_pinning_bypass', 'debugger_check_bypass', 'root_bypass'],
+        ['get_dependencies'],
+        None,
+        None,
+    )
+    location = Path(frd.deps)
+    if location.exists():
+        location.write_text('')
+    frd.spawn()
+    Thread(target=frd.session, args=(None, None), daemon=True).start()
+
+
+def dependency_analysis(package, app_dir):
+    deps = set()
+    msg = 'Collecting Runtime Dependency Analysis data'
+    try:
+        ignore = (
+            package,
+            'android.', 'androidx.', 'kotlin.', 'kotlinx.', 'java.', 'javax.',
+            'sun.', 'com.android.', 'j$', 'dalvik.system.', 'libcore.',
+            'com.google.', 'org.kxml2.', 'org.apache.', 'org.json.')
+        location = Path(app_dir) / 'mobsf_app_deps.txt'
+        if not location.exists():
+            return deps
+        logger.info(msg)
+        data = location.read_text('utf-8', 'ignore').splitlines()
+        for dep in data:
+            if not dep.startswith(ignore):
+                deps.add(dep.rsplit('.', 1)[0])
+    except Exception:
+        logger.exception(msg)
+    return deps

@@ -11,31 +11,53 @@
       <title>Mobile Security Framework - MobSF</title>
       <link rel="stylesheet" href="{% static "adminlte/dashboard/css/adminlte.min.css" %}">
       <link rel="stylesheet" href="{% static "adminlte/plugins/fontawesome-free/css/all.min.css" %}">
+      <link rel="stylesheet" href="{% static "others/css/spinner.css" %}">
       <link rel="stylesheet" href="{% static "landing/css/home.css" %}">
       <!-- Google Font: Source Sans Pro -->
       <link href="https://fonts.googleapis.com/css?family=Source+Sans+Pro:300,400,400i,700" rel="stylesheet">
    </head>
    <body>
-   <div class="topnav">
 
-        <!-- Centered link -->
-        <div class="topnav-centered">
-         <a>
-            <img src="{% static "img/mobsf_logo.png" %}" width="20%" height="20%"/>
-        </a>
+    <nav class="navbar navbar-expand-md navbar-dark bg-dark">
+        <div class="container-fluid">
+            <a  class="navbar-brand abs">
+                <img src="{% static "img/mobsf_logo.png" %}" width="20%" height="20%"/>
+            </a>
+            <button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#collapsingNavbar">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="navbar-collapse collapse" id="collapsingNavbar">
+                <ul class="navbar-nav">
+                    <li class="nav-item active">
+                        <a class="nav-link" href="{% url 'recent' %}">RECENT</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="{% url 'dynamic' %}">DYNAMIC ANALYZER</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="{% url 'api_docs' %}">API</a>
+                    </li>
+                </ul>
+                <ul class="navbar-nav ml-auto">
+                    <li class="nav-item">
+                        <a class="nav-link" target="_blank" href="https://mobsf.github.io/docs/#/">DOCS</a>
+                    </li>
+                    <li class="nav-item">
+                        <a  class="nav-link" href="{% url 'about' %}">ABOUT</a>
+                    </li>
+                    <li class="nav-item">
+                        <a>
+                        <form action="/search" method="GET">
+                            <input name="md5" type="text" class="form-control" placeholder="Search MD5">
+                        </form>
+                        </a>
+                    </li>
+                </ul>
+            </div>
         </div>
-        <!-- Left-aligned links (default) -->
-        <a href="{% url 'recent' %}">RECENT SCANS</a>
-        <a href="{% url 'dynamic' %}">DYNAMIC ANALYZER</a>
+    </nav>
 
-        <!-- Right-aligned links -->
-        <div class="topnav-right">
-            <a href="{% url 'api_docs' %}">API DOCS</a>
-            <a href="{% url 'about' %}">ABOUT</a>
-        </div>
-
-        </div>
-      <div class="site-wrapper">
+    <div class="site-wrapper">
          <div class="site-wrapper-inner">
             <div class="cover-container">
                <div class="masthead clearfix">
@@ -61,11 +83,13 @@
                   </form>
                </div>
                <div class="mastfoot">
-                  <form action="/search" method="GET">
-                     <input name="md5" type="text" class="form-control" placeholder="Search MD5">
-                  </form>
+                
+                  <input type="download" id="package" class="form-control" placeholder="Download & Scan by package name"/>
+
+
                   <div class="inner">
-                     <h6> <a href="{% url 'recent' %}">RECENT SCANS</a>  |  <a href="{% url 'dynamic' %}">DYNAMIC ANALYZER</a>  |  <a href="{% url 'api_docs' %}">API DOCS</a>   |  <a href="{% url 'about' %}">ABOUT</a></h6>
+                     <h6> <a href="{% url 'recent' %}">RECENT SCANS</a>  |  <a href="{% url 'dynamic' %}">DYNAMIC ANALYZER</a>  |  <a href="{% url 'api_docs' %}">API</a>   |  <a href="{% url 'donate' %}">DONATE ♥</a> |  <a target="_blank"
+                         href="https://mobsf.github.io/docs/#/">DOCS</a>  | <a href="{% url 'about' %}">ABOUT</a></h6>
                      </br>
                      <p>&copy; {% now "Y" %}  Mobile Security Framework - MobSF {{ version }}</p>
                   </div>
@@ -73,8 +97,88 @@
             </div>
          </div>
       </div>
-      <script src="{% static "adminlte/plugins/jquery.min.js" %}"></script>
+
+      <div class="hidden loading">
+        <div class='uil-ring-css' style='transform:scale(0.79);'>
+          <div></div>
+        </div>
+        </div>
+
+        <script src="{% static "adminlte/plugins/jquery.min.js" %}"></script>
+        <script src="{% static "others/js/notify.min.js" %}"></script>
+        <!-- Bootstrap 4 -->
+        <script src="{% static "adminlte/plugins/bootstrap/bootstrap.bundle.min.js" %}"></script>
       <script>
+            let warning = "This is a demo MobSF instance. Anything uploaded here will be publicly available. Do you want to continue?";
+            // Result View
+            function load_result(url){
+                hide_loader();
+                var xhr = new XMLHttpRequest()
+                xhr.open('GET', url, true)
+                xhr.addEventListener("loadstart", function(evt){
+                    Notifier.snackbar({
+                        message: "Analysis started! Please wait to be redirected or check recent scans after sometime.",
+                        duration: 10,
+                    });
+                })
+                xhr.addEventListener("load", function (evt) {
+                    window.location.href = window.location.href + url;
+                }, false);
+                xhr.send();
+            }
+
+            //Download and scan APK
+            $('#package').keypress(function(event){
+                var keycode = (event.keyCode ? event.keyCode : event.which);
+                if(keycode == '13'){
+                    _("status").innerText = 'Trying to download ...';
+                    show_loader();
+                    $.ajax({
+                        url : '{% url "download_scan" %}', 
+                        type : "POST",
+                        dataType: "json", 
+                        data : {
+                            package: $('#package').val(),
+                            csrfmiddlewaretoken: '{{ csrf_token }}',
+                        },
+                        success : function(json){
+                            if (json.status === 'ok'){
+                                i = 1;
+                                setInterval(function() {
+                                    dot = '';
+                                    for (x = 1; x <= i; x++) {
+                                        dot += '.';
+                                    }
+                                    _("status").innerText = "Analyzing" + dot;
+                                    i += 1;
+                                    if (i == 5) {
+                                        i = 1;
+                                    }
+                                }, 2000);
+
+                                url = json.analyzer + '/' + json.hash + '/';
+                                load_result(url);
+                            } else {
+                                hide_loader();
+                                _("status").innerText = json.description;
+                            }
+                        },
+                        error : function(xhr, ajaxOptions, thrownError) {
+                            hide_loader();
+                        }
+                    });
+                }
+            });
+            function show_loader(){
+                var loadingOverlay = document.querySelector('.loading');
+                loadingOverlay.classList.remove('hidden');
+            }
+
+            function hide_loader(){
+                var loadingOverlay = document.querySelector('.loading');
+                loadingOverlay.classList.add('hidden');
+            }
+            // Existing
             function _(el){
                 return document.getElementById(el);
             }
@@ -95,11 +199,8 @@
                             i = 1;
                         }
                     }, 2000);
-                    var url = json.analyzer + '/';
-                    if (json.hash){
-                        url += '?name=' + json.file_name + '&checksum=' + json.hash + '&type=' + json.scan_type
-                    }
-                    window.location.href = window.location.href + url;
+                    var url = json.analyzer + '/' + json.hash + '/';
+                    load_result(url);
                 }
             }
             function progressHandler(event) {
@@ -118,13 +219,13 @@
             function abortHandler(event) {
                 _("status").innerText = "Upload Aborted!";
             }
-          // Is valid file extentions
+          // Is valid file extensions
           function isValidExt(file_name){
                 var val = file_name.toLowerCase();
-                var regex = new RegExp("(.*?)\.(ipa|apk|xapk|zip|appx)$");
+                var regex = new RegExp("^(.{1,300}?)\.(ipa|apk|apks|xapk|jar|aar|so|dylib|a|zip|appx)$");
                 val = val.replace(/^.*[\\\/]/, '');
                 if (!(regex.test(val))) {
-                    _('status').innerText = "Please upload APK/XAPK/IPA/ZIP/APPX only!";
+                    _('status').innerText = "Please upload APK/APKS/XAPK/JAR/AAR/SO/IPA/DYLIB/A/ZIP/APPX only!";
                     return false;
                 }
                 return true;
@@ -209,9 +310,16 @@
                document.querySelector("#drop").style.visibility = "hidden";
                document.querySelector("#drop").style.opacity = 0;
                document.querySelector("#textnode").style.fontSize = "42px";
-               if(e.dataTransfer.files.length > 0)
-               {
-               handleFiles(e.dataTransfer.files);
+               if(e.dataTransfer.files.length > 0) {
+                if (document.location.host === 'mobsf.live'){
+                    if (confirm(warning) == true) {
+                        handleFiles(e.dataTransfer.files);
+                    } else {
+                        return;
+                    }
+                } else {
+                    handleFiles(e.dataTransfer.files);
+                }
                }
            });
 
@@ -222,9 +330,18 @@
                     if (_("uploadFile").files.length === 0) {
                         return;
                     }
-                    _("uploadFile").style.display = "none";
                     var files = _("uploadFile").files;
-                    handleFiles(files);
+                    if (document.location.host === 'mobsf.live'){
+                        if (confirm(warning) == true) {
+                            _("uploadFile").style.display = "none";
+                            handleFiles(files);
+                        } else {
+                            return;
+                        }
+                    } else {
+                        _("uploadFile").style.display = "none";
+                        handleFiles(files);
+                    }
                 });
             });
       </script>

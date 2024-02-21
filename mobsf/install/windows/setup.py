@@ -13,7 +13,7 @@ import subprocess
 import sys
 from os.path import expanduser
 
-from six.moves import input
+from six.moves import input as sinput
 
 try:
     import urllib.request as urlrequest
@@ -171,6 +171,7 @@ def tools_binskim():
         [
             nuget,
             'install', binskim_nuget, '-Pre',
+            '-Version', '1.7.2',
             '-o', mobsf_subdir_tools])
 
     # Some code to determine the version on the fly so we don't have to fix the
@@ -178,7 +179,7 @@ def tools_binskim():
 
     # Search for the version number
     folder = re.search(
-        b'Microsoft\\.CodeAnalysis\\.BinSkim\\..*(\'|\") ', output)
+        b'Microsoft\\.CodeAnalysis\\.BinSkim\\..{0,300}(\'|\") ', output)
     try:
         # Substring-Foo for removing b'X's in python3
         if sys.version_info.major == 3:
@@ -302,16 +303,19 @@ def generate_secret():
     pub_key_file = open(CONFIG['MobSF']['pub_key'], 'w')
     pub_key_file.write(pubkey.save_pkcs1().decode('utf-8'))
     pub_key_file.close()
-
+    config_path = os.path.join(
+        expanduser('~'),
+        '.MobSF',
+        'config.py')
     print((
         '[!] Please move the private key file\n'
         '\t{}\n'
-        '\tto MobSF to the path specified in settings.py\n'
+        '\tto MobSF to the path specified in {}\n'
         '\t(default: Mobile-Security-Framework-MobSF/'
         'mobsf/MobSF/windows_vm_priv_key.asc)'
-        .format(CONFIG['MobSF']['priv_key'])
+        .format(CONFIG['MobSF']['priv_key'], config_path)
     ))
-    input('Please press any key when done..')
+    sinput('Please press any key when done..')
 
 
 def autostart():

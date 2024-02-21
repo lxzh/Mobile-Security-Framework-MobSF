@@ -16,6 +16,7 @@ from mobsf.MobSF.utils import (
     filename_from_path,
     find_java_binary,
     is_file_exists,
+    settings_enabled,
 )
 
 
@@ -31,29 +32,35 @@ def get_dex_files(app_dir):
 def dex_2_smali(app_dir, tools_dir):
     """Run dex2smali."""
     try:
+        if not settings_enabled('DEX2SMALI_ENABLED'):
+            return
         logger.info('DEX -> SMALI')
         dexes = get_dex_files(app_dir)
         for dex_path in dexes:
-            logger.info('Converting %s to Smali Code',
-                        filename_from_path(dex_path))
-            if (len(settings.BACKSMALI_BINARY) > 0
-                    and is_file_exists(settings.BACKSMALI_BINARY)):
-                bs_path = settings.BACKSMALI_BINARY
-            else:
-                bs_path = os.path.join(tools_dir, 'baksmali-2.5.2.jar')
-            output = os.path.join(app_dir, 'smali_source/')
-            smali = [
-                find_java_binary(),
-                '-jar',
-                bs_path,
-                'd',
-                dex_path,
-                '-o',
-                output,
-            ]
-            trd = threading.Thread(target=subprocess.call, args=(smali,))
-            trd.daemon = True
-            trd.start()
+            try:
+                logger.info('Converting %s to Smali Code',
+                            filename_from_path(dex_path))
+                if (len(settings.BACKSMALI_BINARY) > 0
+                        and is_file_exists(settings.BACKSMALI_BINARY)):
+                    bs_path = settings.BACKSMALI_BINARY
+                else:
+                    bs_path = os.path.join(tools_dir, 'baksmali-2.5.2.jar')
+                output = os.path.join(app_dir, 'smali_source/')
+                smali = [
+                    find_java_binary(),
+                    '-jar',
+                    bs_path,
+                    'd',
+                    dex_path,
+                    '-o',
+                    output,
+                ]
+                trd = threading.Thread(target=subprocess.call, args=(smali,))
+                trd.daemon = True
+                trd.start()
+            except Exception:
+                # Fixes a bug #2014
+                pass
     except Exception:
         logger.exception('Converting DEX to SMALI')
 
@@ -90,8 +97,11 @@ def apk_2_java(app_path, app_dir, tools_dir):
             app_path,
         ]
         fnull = open(os.devnull, 'w')
-        subprocess.call(args,
-                        stdout=fnull,
-                        stderr=subprocess.STDOUT)
+        subprocess.run(args,
+                       stdout=fnull,
+                       stderr=subprocess.STDOUT,
+                       timeout=settings.JADX_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        logger.warning('Decompiling with jadx timed out')
     except Exception:
         logger.exception('Decompiling to JAVA')

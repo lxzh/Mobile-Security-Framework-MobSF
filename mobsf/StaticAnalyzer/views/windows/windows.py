@@ -24,15 +24,20 @@ from django.utils.html import escape
 
 from mobsf.MobSF.utils import (
     file_size,
+    get_config_loc,
+    is_md5,
     print_n_send_error_response,
 )
+from mobsf.MobSF.views.home import update_scan_timestamp
 import mobsf.MalwareAnalyzer.views.VirusTotal as VirusTotal
-from mobsf.StaticAnalyzer.models import StaticAnalyzerWindows
+from mobsf.StaticAnalyzer.models import (
+    RecentScansDB,
+    StaticAnalyzerWindows,
+)
 from mobsf.StaticAnalyzer.tools.strings import strings_util
-from mobsf.StaticAnalyzer.views.shared_func import (
+from mobsf.StaticAnalyzer.views.common.shared_func import (
     hash_gen,
     unzip,
-    update_scan_timestamp,
 )
 from mobsf.StaticAnalyzer.views.windows.db_interaction import (
     get_context_from_analysis,
@@ -53,106 +58,104 @@ config = None
 # Windows Support Functions
 
 
-def staticanalyzer_windows(request, api=False):
+def staticanalyzer_windows(request, checksum, api=False):
     """Analyse a windows app."""
     try:
         # Input validation
         logger.info('Windows Static Analysis Started')
+        rescan = False
         app_dic = {}  # Dict to store the binary attributes
         if api:
-            typ = request.POST['scan_type']
-            rescan = str(request.POST.get('re_scan', 0))
-            checksum = request.POST['hash']
-            filename = request.POST['file_name']
+            re_scan = request.POST.get('re_scan', 0)
         else:
-            typ = request.GET['type']
-            rescan = str(request.GET.get('rescan', 0))
-            checksum = request.GET['checksum']
-            filename = request.GET['name']
-        md5_regex = re.match('^[0-9a-f]{32}$', checksum)
-        if (md5_regex) and (typ in ['appx']):
-            app_dic['app_name'] = filename  # APP ORGINAL NAME
-            app_dic['md5'] = checksum
-            app_dic['app_dir'] = os.path.join(
-                settings.UPLD_DIR, app_dic['md5'] + '/')
-            app_dic['tools_dir'] = os.path.join(
-                settings.BASE_DIR, 'StaticAnalyzer/tools/windows/')
-            if typ == 'appx':
-                # DB
-                db_entry = StaticAnalyzerWindows.objects.filter(
-                    MD5=app_dic['md5'],
-                )
-                if db_entry.exists() and rescan == '0':
-                    logger.info(
-                        'Analysis is already Done.'
-                        ' Fetching data from the DB...')
-                    context = get_context_from_db_entry(db_entry)
-                else:
-                    logger.info('Windows Binary Analysis Started')
-                    app_dic['app_path'] = os.path.join(
-                        app_dic['app_dir'], app_dic['md5'] + '.appx')
-                    # ANALYSIS BEGINS
-                    app_dic['size'] = str(
-                        file_size(app_dic['app_path'])) + 'MB'
-                    # Generate hashes
-                    app_dic['sha1'], app_dic[
-                        'sha256'] = hash_gen(app_dic['app_path'])
-                    # EXTRACT APPX
-                    logger.info('Extracting APPX')
-                    app_dic['files'] = unzip(
-                        app_dic['app_path'], app_dic['app_dir'])
-                    xml_dic = _parse_xml(app_dic['app_dir'])
-                    bin_an_dic = _binary_analysis(app_dic)
-                    # Saving to db
-                    logger.info('Connecting to DB')
-                    if rescan == '1':
-                        logger.info('Updating Database...')
-                        save_or_update('update',
-                                       app_dic,
-                                       xml_dic,
-                                       bin_an_dic)
-                        update_scan_timestamp(app_dic['md5'])
-                    elif rescan == '0':
-                        logger.info('Saving to Database')
-                        save_or_update('save',
-                                       app_dic,
-                                       xml_dic,
-                                       bin_an_dic)
-                    context = get_context_from_analysis(app_dic,
-                                                        xml_dic,
-                                                        bin_an_dic)
-                context['virus_total'] = None
-                if settings.VT_ENABLED:
-                    vt = VirusTotal.VirusTotal()
-                    context['virus_total'] = vt.get_result(
-                        os.path.join(app_dic['app_dir'], app_dic[
-                                     'md5']) + '.appx',
-                        app_dic['md5'])
-                template = 'static_analysis/windows_binary_analysis.html'
-                if api:
-                    return context
-                else:
-                    return render(request, template, context)
-            else:
-                msg = 'File type not supported'
-                if api:
-                    return print_n_send_error_response(request, msg, True)
-                else:
-                    return print_n_send_error_response(request, msg, False)
+            re_scan = request.GET.get('rescan', 0)
+        if re_scan == '1':
+            rescan = True
+        if not is_md5(checksum):
+            return print_n_send_error_response(
+                request,
+                'Invalid Hash',
+                api)
+        robj = RecentScansDB.objects.filter(MD5=checksum)
+        if not robj.exists():
+            return print_n_send_error_response(
+                request,
+                'The file is not uploaded/available',
+                api)
+        typ = robj[0].SCAN_TYPE
+        filename = robj[0].FILE_NAME
+        if typ != 'appx':
+            return print_n_send_error_response(
+                request,
+                'File type not supported',
+                api)
+
+        app_dic['app_name'] = filename  # APP ORIGINAL NAME
+        app_dic['md5'] = checksum
+        app_dic['app_dir'] = os.path.join(
+            settings.UPLD_DIR, app_dic['md5'] + '/')
+        app_dic['tools_dir'] = os.path.join(
+            settings.BASE_DIR, 'StaticAnalyzer/tools/windows/')
+        # DB
+        db_entry = StaticAnalyzerWindows.objects.filter(
+            MD5=app_dic['md5'],
+        )
+        if db_entry.exists() and not rescan:
+            logger.info(
+                'Analysis is already Done.'
+                ' Fetching data from the DB...')
+            context = get_context_from_db_entry(db_entry)
         else:
-            msg = 'Hash match failed or Invalid file extension'
-            if api:
-                return print_n_send_error_response(request, msg, True)
+            logger.info('Windows Binary Analysis Started')
+            app_dic['app_path'] = os.path.join(
+                app_dic['app_dir'], app_dic['md5'] + '.appx')
+            # ANALYSIS BEGINS
+            app_dic['size'] = str(
+                file_size(app_dic['app_path'])) + 'MB'
+            # Generate hashes
+            app_dic['sha1'], app_dic[
+                'sha256'] = hash_gen(app_dic['app_path'])
+            # EXTRACT APPX
+            logger.info('Extracting APPX')
+            app_dic['files'] = unzip(
+                app_dic['app_path'], app_dic['app_dir'])
+            xml_dic = _parse_xml(app_dic['app_dir'])
+            bin_an_dic = _binary_analysis(app_dic)
+            # Saving to db
+            logger.info('Connecting to DB')
+            if rescan:
+                logger.info('Updating Database...')
+                save_or_update('update',
+                               app_dic,
+                               xml_dic,
+                               bin_an_dic)
+                update_scan_timestamp(app_dic['md5'])
             else:
-                return print_n_send_error_response(request, msg, False)
+                logger.info('Saving to Database')
+                save_or_update('save',
+                               app_dic,
+                               xml_dic,
+                               bin_an_dic)
+            context = get_context_from_analysis(app_dic,
+                                                xml_dic,
+                                                bin_an_dic)
+            context['virus_total'] = None
+        template = 'static_analysis/windows_binary_analysis.html'
+        context['virus_total'] = None
+        if settings.VT_ENABLED:
+            vt = VirusTotal.VirusTotal()
+            context['virus_total'] = vt.get_result(
+                os.path.join(app_dic['app_dir'], app_dic['md5']) + '.appx',
+                app_dic['md5'])
+        if api:
+            return context
+        else:
+            return render(request, template, context)
     except Exception as exception:
         logger.exception('Error Performing Static Analysis')
         msg = str(exception)
         exp_doc = exception.__doc__
-        if api:
-            return print_n_send_error_response(request, msg, True, exp_doc)
-        else:
-            return print_n_send_error_response(request, msg, False, exp_doc)
+        return print_n_send_error_response(request, msg, api, exp_doc)
 
 
 def _get_token():
@@ -180,7 +183,7 @@ def _binary_analysis(app_dic):
             bin_an_dic['bin_name'] = file_name.replace('.exe', '')
             break
     if not bin_an_dic.get('bin_name'):
-        logger.exception('No executeable in appx.')
+        logger.exception('No executable in appx.')
     bin_path = os.path.join(app_dic['app_dir'], bin_an_dic['bin'])
 
     # Execute strings command
@@ -219,8 +222,8 @@ def _binary_analysis(app_dic):
             bin_an_dic = binscope(name, bin_an_dic)
         else:
             logger.warning(
-                'Windows VM not configured in settings.py.'
-                ' Skipping Binskim and Binscope.')
+                'Windows VM not configured in %s.'
+                ' Skipping Binskim and Binscope.', get_config_loc())
             warning = {
                 'rule_id': 'VM',
                 'status': 'Info',
@@ -230,11 +233,11 @@ def _binary_analysis(app_dic):
             }
             bin_an_dic['results'].append(warning)
     else:
-        logger.info('Running lokal analysis.')
+        logger.info('Running local analysis.')
 
         global config
         config = configparser.ConfigParser()
-        # Switch to settings definded path if available
+        # Switch to settings defined path if available
         config.read(expanduser('~') + '\\MobSF\\Config\\config.txt')
 
         # Run analysis functions
@@ -356,7 +359,7 @@ def parse_binskim_sarif(bin_an_dic, output):
             bin_an_dic['results'].append(result)
     else:
         logger.warning('binskim has no results.')
-        # Create an warining for the gui
+        # Create an warning for the gui
         warning = {
             'rule_id': 'No Binskim-Results',
             'status': 'Info',
@@ -396,7 +399,7 @@ def parse_binskim_old(bin_an_dic, output):
             bin_an_dic['results'].append(result)
     else:
         logger.warning('binskim has no results.')
-        # Create an warining for the gui
+        # Create an warning for the gui
         warning = {
             'rule_id': 'No Binskim-Results',
             'status': 'Info',
@@ -517,7 +520,7 @@ def binscope(name, bin_an_dic, run_local=False, app_dir=None):
 
 
 def _parse_xml(app_dir):
-    """Parse the AppxManifest file to get basic informations."""
+    """Parse the AppxManifest file to get basic information."""
     logger.info('Starting Binary Analysis - XML')
     xml_file = os.path.join(app_dir, 'AppxManifest.xml')
     xml_dic = {

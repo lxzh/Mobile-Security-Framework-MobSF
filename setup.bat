@@ -1,17 +1,22 @@
 @echo off
 rem Python Check
+set /a count=0
 where python >nul 2>&1 && (
-  deactivate >nul 2>&1
-  echo [INSTALL] Python is available
+  echo [INSTALL] Checking for Python version 3.10+
   :redo
-  rem Python Version Check
-  for /F "tokens=* USEBACKQ" %%F IN (`python --version`) DO (
-  set var=%%F
+  if %count% lss 3 (
+    set /a count+=1
+    rem Python Version Check
+    for /F "tokens=* USEBACKQ" %%F IN (`python --version`) DO (
+      set var=%%F
+    )
+  ) else (
+    exit /b
   )
-  echo %var%|findstr /R "[3].[89]" >nul
+  echo %var%|findstr /R "[3].[1011]" >nul
   if errorlevel 1 (
       if "%var%"=="" goto redo
-      echo [ERROR] MobSF dependencies require Python 3.8/3.9. Your python points to %var%
+      echo [ERROR] MobSF dependencies require Python 3.10-3.11. Your python points to %var%
       exit /b
   ) else (
       echo [INSTALL] Found %var%
@@ -32,7 +37,7 @@ where python >nul 2>&1 && (
     echo [INSTALL] Found OpenSSL executable
   ) else (
    echo [ERROR] OpenSSL executable not found in [C:\\Program Files\\OpenSSL-Win64\\bin\\openssl.exe]
-   echo [INFO] Install OpenSSL non-light version - https://slproweb.com/products/Win32OpenSSL.html
+   echo [INFO] Install OpenSSL non-light version [Win64 OpenSSL v3.x] - https://slproweb.com/products/Win32OpenSSL.html
    pause
    exit /b
   )
@@ -47,29 +52,24 @@ where python >nul 2>&1 && (
     exit /b
   )
 
-  rem Install venv
-  echo [INSTALL] Using venv
-  rmdir "venv" /q /s >nul 2>&1
-  python -m venv ./venv
-  .\venv\Scripts\activate
-  python -m pip install --upgrade pip
-
   set LIB=C:\Program Files\OpenSSL-Win64\lib;%LIB%
   set INCLUDE=C:\Program Files\OpenSSL-Win64\include;%INCLUDE%
 
   echo [INSTALL] Installing Requirements
-  pip install --no-cache-dir -r requirements.txt
-  
+  python -m pip install --no-cache-dir wheel poetry==1.6.1
+  python -m poetry lock
+  python -m poetry install --only main --no-root --no-interaction --no-ansi || python -m poetry install --only main --no-root --no-interaction --no-ansi || python -m poetry install --only main --no-root --no-interaction --no-ansi
+ 
   echo [INSTALL] Clean Up
   call scripts/clean.bat y
 
   echo [INSTALL] Migrating Database
-  python manage.py makemigrations
-  python manage.py makemigrations StaticAnalyzer
-  python manage.py migrate
+  poetry run python manage.py makemigrations
+  poetry run python manage.py makemigrations StaticAnalyzer
+  poetry run python manage.py migrate
   echo Download and Install wkhtmltopdf for PDF Report Generation - https://wkhtmltopdf.org/downloads.html
   echo [INSTALL] Installation Complete
-  python scripts/check_install.py
+  exit /b 0
 ) || (
   echo [ERROR] python3 is not installed
 )
